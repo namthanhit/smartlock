@@ -2,15 +2,16 @@
 #include <Firebase_ESP_Client.h>
 #include <Keypad.h>
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <SPI.h>
 #include <MFRC522.h>
 #include <ESP32Servo.h>
 #include "time.h"
 
 // WiFi credentials
-#define WIFI_SSID "Dung"
-#define WIFI_PASSWORD "88888888"
+#define WIFI_SSID "Hoàng"
+#define WIFI_PASSWORD "Hoang1211"
 
 // Firebase credentials
 #define API_KEY "AIzaSyCQWL75UKcjP0kNk2okLcYeLBAWut-tHLM"
@@ -30,11 +31,12 @@ byte rowPins[ROWS] = {13, 12, 14, 27};
 byte colPins[COLS] = {26, 25, 33, 32};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// LCD I2C
-#define LCD_ADDRESS 0x27
-#define LCD_COLUMNS 16
-#define LCD_ROWS 2
-LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+// OLED setup
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // RFID setup
 #define RST_PIN 4
@@ -79,9 +81,106 @@ time_t getCurrentTimestamp() {
   return now;
 }
 
+void displayText(String line1, String line2 = "", int textSize = 1, bool center = false) {
+  display.clearDisplay();
+  display.setTextSize(textSize);
+  display.setTextColor(SSD1306_WHITE);
+  
+  if (center) {
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(line1, 0, 0, &x1, &y1, &w, &h);
+    int x = (SCREEN_WIDTH - w) / 2;
+    display.setCursor(x, 10);
+  } else {
+    display.setCursor(0, 0);
+  }
+  
+  display.println(line1);
+  
+  if (line2 != "") {
+    if (center) {
+      int16_t x1, y1;
+      uint16_t w, h;
+      display.getTextBounds(line2, 0, 0, &x1, &y1, &w, &h);
+      int x = (SCREEN_WIDTH - w) / 2;
+      display.setCursor(x, 30);
+    } else {
+      display.setCursor(0, textSize == 1 ? 10 : 20);
+    }
+    display.println(line2);
+  }
+  
+  display.display();
+}
+
+void displayPasswordInput(String password) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  display.setCursor(0, 0);
+  display.println("Enter Password:");
+  
+  display.setCursor(0, 20);
+  display.print("Input: ");
+  
+  if (password.length() > 0) {
+    // Nếu đang trong thời gian delay, hiển thị tất cả ký tự trước đó bằng * và ký tự cuối bình thường
+    if (shouldMask && millis() - lastKeyPressTime < MASK_DELAY) {
+      // Hiển thị các ký tự trước bằng *
+      for (int i = 0; i < password.length() - 1; i++) {
+        display.print("*");
+      }
+      // Hiển thị ký tự cuối cùng
+      display.print(password.charAt(password.length() - 1));
+    } else {
+      // Hiển thị tất cả ký tự bằng *
+      for (int i = 0; i < password.length(); i++) {
+        display.print("*");
+      }
+    }
+  }
+  
+  display.display();
+}
+
+void displayMainScreen() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  
+  // Căn giữa "SMART LOCK!"
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds("SMART LOCK!", 0, 0, &x1, &y1, &w, &h);
+  int x = (SCREEN_WIDTH - w) / 2;
+  display.setCursor(x, 10);
+  display.println("SMART LOCK");
+  
+  // Hiển thị trạng thái Away Mode
+  display.setTextSize(1);
+  String awayText = "Away: " + String(awayMode ? "ON" : "OFF");
+  display.getTextBounds(awayText, 0, 0, &x1, &y1, &w, &h);
+  x = (SCREEN_WIDTH - w) / 2;
+  display.setCursor(x, 45);
+  display.println(awayText);
+  
+  display.display();
+}
+
 void setup() {
   Serial.begin(115200);
   Wire.begin(16, 17); // SDA, SCL
+
+  // Khởi tạo OLED
+  if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  
+  display.clearDisplay();
+  display.display();
 
   SPI.begin();
   mfrc522.PCD_Init();
@@ -90,28 +189,29 @@ void setup() {
   doorServo.attach(SERVO_PIN);
   doorServo.write(SERVO_LOCK_ANGLE); // Khóa cửa ban đầu
   
-  lcd.init();
-  lcd.backlight();
-
-  lcd.setCursor(0, 0);
-  lcd.print("Smart Lock Init");
-  lcd.setCursor(0, 1);
-  lcd.print("Starting...");
+  displayText("Smart Lock Init", "Starting...", 1, true);
+  delay(2000);
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Connecting WiFi");
+  displayText("Connecting WiFi", "", 1, true);
+  
+  int dotCount = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    lcd.print(".");
+    dotCount++;
+    String dots = "";
+    for(int i = 0; i < (dotCount % 4); i++) {
+      dots += ".";
+    }
+    displayText("Connecting WiFi", dots, 1, true);
     Serial.print(".");
   }
-  lcd.clear();
-  lcd.print("WiFi Connected");
+  
+  displayText("WiFi Connected", "", 1, true);
   Serial.println("\nWiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+  delay(2000);
 
   // NTP time (UTC+7)
   configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
@@ -123,33 +223,34 @@ void setup() {
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
 
-  lcd.setCursor(0, 1);
-  lcd.print("Conn Firebase...");
+  displayText("Connecting", "Firebase...", 1, true);
+  
+  dotCount = 0;
   while (!Firebase.ready()) {
     delay(500);
-    lcd.print(".");
+    dotCount++;
+    String dots = "";
+    for(int i = 0; i < (dotCount % 4); i++) {
+      dots += ".";
+    }
+    displayText("Connecting", "Firebase" + dots, 1, true);
     Serial.print(".");
   }
 
-  lcd.clear();
-  lcd.print("Firebase Ready");
+  displayText("Firebase Ready", "", 1, true);
   Serial.println("\nFirebase connected!");
+  delay(2000);
 
   if (Firebase.RTDB.getString(&fbdo, "/masterPassword")) {
     masterPassword = fbdo.stringData();
-    lcd.setCursor(0, 1);
-    lcd.print("Pass Loaded");
+    displayText("Firebase Ready", "Pass Loaded", 1, true);
   } else {
-    lcd.setCursor(0, 1);
-    lcd.print("Pass Load Fail");
+    displayText("Firebase Ready", "Pass Load Fail", 1, true);
     Serial.println("Failed to load master password: " + fbdo.errorReason());
   }
+  delay(2000);
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("SMART LOCK!");
-  lcd.setCursor(0, 1);
-  lcd.print("Away: ON");
+  displayMainScreen();
 }
 
 void loop() {
@@ -171,11 +272,7 @@ void loop() {
       enteringPassword = true;
       inputPassword = "";
       shouldMask = false;
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Enter Password:");
-      lcd.setCursor(0, 1);
-      lcd.print("Input: ");
+      displayPasswordInput(inputPassword);
     } else if (enteringPassword) {
       if (key == '#') {
         checkPassword(inputPassword);
@@ -184,14 +281,12 @@ void loop() {
       } else if (key == '*') {
         inputPassword = "";
         shouldMask = false;
-        lcd.setCursor(7, 1);
-        lcd.print("        ");
-        lcd.setCursor(7, 1);
+        displayPasswordInput(inputPassword);
       } else {
         inputPassword += key;
         lastKeyPressTime = millis();
         shouldMask = true;
-        updatePasswordDisplay(inputPassword);
+        displayPasswordInput(inputPassword);
       }
     }
   }
@@ -206,33 +301,8 @@ void loop() {
 void handlePasswordMasking(String& inputPassword) {
   if (enteringPassword && shouldMask && inputPassword.length() > 0) {
     if (millis() - lastKeyPressTime >= MASK_DELAY) {
-      updatePasswordDisplay(inputPassword);
+      displayPasswordInput(inputPassword);
       shouldMask = false;
-    }
-  }
-}
-
-void updatePasswordDisplay(String password) {
-  lcd.setCursor(7, 1);
-  lcd.print("        "); // Xóa vùng hiển thị cũ
-  lcd.setCursor(7, 1);
-  
-  if (password.length() == 0) {
-    return;
-  }
-  
-  // Nếu đang trong thời gian delay, hiển thị tất cả ký tự trước đó bằng * và ký tự cuối bình thường
-  if (shouldMask && millis() - lastKeyPressTime < MASK_DELAY) {
-    // Hiển thị các ký tự trước bằng *
-    for (int i = 0; i < password.length() - 1; i++) {
-      lcd.print("*");
-    }
-    // Hiển thị ký tự cuối cùng
-    lcd.print(password.charAt(password.length() - 1));
-  } else {
-    // Hiển thị tất cả ký tự bằng *
-    for (int i = 0; i < password.length(); i++) {
-      lcd.print("*");
     }
   }
 }
@@ -255,13 +325,9 @@ void lockDoor() {
   doorUnlocked = false;
   Serial.println("Door locked");
   
-  // Cập nhật LCD về trạng thái ban đầu
+  // Cập nhật OLED về trạng thái ban đầu
   if (!enteringPassword) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("SMART LOCK!");
-    lcd.setCursor(0, 1);
-    lcd.print("Away: " + String(awayMode ? "ON" : "OFF"));
+    displayMainScreen();
   }
 }
 
@@ -310,8 +376,6 @@ void handleRFID() {
 }
 
 void checkRFIDCard(String cardID) {
-  lcd.clear();
-  
   Serial.println("=== Checking RFID Card ===");
   Serial.println("Looking for card ID: " + cardID);
   
@@ -374,25 +438,16 @@ void checkRFIDCard(String cardID) {
   if (cardAllowed) {
     if (awayMode) {
       // Chặn RFID khi away mode bật
-      lcd.setCursor(0, 0);
-      lcd.print("Away Mode ON");
-      lcd.setCursor(0, 1);
-      lcd.print("Card Blocked");
+      displayText("Away Mode ON", "Card Blocked", 1, true);
       logAccess("RFID Blocked (Away)", false);
       Serial.println("Valid card blocked due to Away Mode");
       
       delay(2000);
-      lcd.clear();
-      lcd.print("SMART LOCK!");
-      lcd.setCursor(0, 1);
-      lcd.print("Away: ON");
+      displayMainScreen();
       return;
     } else {
       // Cho phép truy cập bằng RFID
-      lcd.setCursor(0, 0);
-      lcd.print("Access Granted");
-      lcd.setCursor(0, 1);
-      lcd.print("Method: RFID");
+      displayText("Access Granted", "Method: RFID", 1, true);
       logAccess("RFID", true);
       failedAttempts = 0;
       unlockDoor();
@@ -401,26 +456,18 @@ void checkRFIDCard(String cardID) {
   } else {
     if (awayMode) {
       // Khi away mode bật, hiển thị thông báo giống như thẻ được phép
-      lcd.setCursor(0, 0);
-      lcd.print("Away Mode ON");
-      lcd.setCursor(0, 1);
-      lcd.print("Card Blocked");
+      displayText("Away Mode ON", "Card Blocked", 1, true);
       logAccess("Invalid RFID (Away)", false);
       Serial.println("Invalid card blocked due to Away Mode");
     } else {
       // Thẻ không hợp lệ
       failedAttempts++;
-      lcd.setCursor(0, 0);
-      lcd.print("Invalid Card!");
-      lcd.setCursor(0, 1);
-      lcd.print("Attempts: " + String(failedAttempts));
+      displayText("Invalid Card!", "Attempts: " + String(failedAttempts), 1, true);
       logAccess("Invalid RFID", false);
       Serial.println("Invalid card - Access denied");
       
       if (failedAttempts >= maxAttempts) {
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("LOCKED OUT!!!");
+        displayText("LOCKED OUT!!!", "", 2, true);
         Serial.println("System locked out due to too many failed attempts");
         delay(3000);
         failedAttempts = 0;
@@ -430,11 +477,7 @@ void checkRFIDCard(String cardID) {
 
   delay(2000);
   if (!awayMode || !cardAllowed) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("SMART LOCK!");
-    lcd.setCursor(0, 1);
-    lcd.print("Away: " + String(awayMode ? "ON" : "OFF"));
+    displayMainScreen();
   }
 }
 
@@ -455,8 +498,6 @@ void updateFirebasePasswords() {
 }
 
 void checkPassword(String input) {
-  lcd.clear();
-  
   bool valid = false;
   time_t currentTime = getCurrentTimestamp();
   String accessMethod = "";
@@ -464,18 +505,12 @@ void checkPassword(String input) {
   // Kiểm tra master password
   if (input == masterPassword) {
     if (awayMode) {
-      lcd.setCursor(0, 0);
-      lcd.print("Away Mode ON");
-      lcd.setCursor(0, 1);
-      lcd.print("Access Blocked");
+      displayText("Away Mode ON", "Access Blocked", 1, true);
       logAccess("Password Blocked (Away)", false);
       
       delay(2000);
       enteringPassword = false;
-      lcd.clear();
-      lcd.print("SMART LOCK!");
-      lcd.setCursor(0, 1);
-      lcd.print("Away: ON");
+      displayMainScreen();
       return;
     } else {
       valid = true;
@@ -500,25 +535,18 @@ void checkPassword(String input) {
       Serial.println("OTP expired");
       Serial.println("Current time: " + String(currentTime));
       Serial.println("OTP valid until: " + String(otpValidUntil));
-      lcd.setCursor(0, 0);
-      lcd.print("OTP Expired!");
+      displayText("OTP Expired!", "", 1, true);
       delay(2000);
     }
   } else {
     // Mật khẩu sai
     if (awayMode) {
-      lcd.setCursor(0, 0);
-      lcd.print("Away Mode ON");
-      lcd.setCursor(0, 1);
-      lcd.print("Access Blocked");
+      displayText("Away Mode ON", "Access Blocked", 1, true);
       logAccess("Wrong Password (Away)", false);
       
       delay(2000);
       enteringPassword = false;
-      lcd.clear();
-      lcd.print("SMART LOCK!");
-      lcd.setCursor(0, 1);
-      lcd.print("Away: ON");
+      displayMainScreen();
       return;
     } else {
       logAccess("Wrong Password", false);
@@ -526,22 +554,14 @@ void checkPassword(String input) {
   }
 
   if (valid) {
-    lcd.setCursor(0, 0);
-    lcd.print("Access Granted");
-    lcd.setCursor(0, 1);
-    lcd.print("Method: " + accessMethod);
+    displayText("Access Granted", "Method: " + accessMethod, 1, true);
     failedAttempts = 0;
     unlockDoor(); // Mở khóa servo
   } else if (!awayMode) {
     failedAttempts++;
-    lcd.setCursor(0, 0);
-    lcd.print("Wrong Password!");
-    lcd.setCursor(0, 1);
-    lcd.print("Attempts: " + String(failedAttempts));
+    displayText("Wrong Password!", "Attempts: " + String(failedAttempts), 1, true);
     if (failedAttempts >= maxAttempts) {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("LOCKED OUT!!!");
+      displayText("LOCKED OUT!!!", "", 2, true);
       delay(3000);
       failedAttempts = 0;
     }
@@ -551,22 +571,20 @@ void checkPassword(String input) {
   input = "";
   enteringPassword = false;
   
-  // Chỉ cập nhật LCD nếu cửa chưa được mở
+  // Chỉ cập nhật OLED nếu cửa chưa được mở
   if (!doorUnlocked) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("SMART LOCK!");
-    lcd.setCursor(0, 1);
-    lcd.print("Away: " + String(awayMode ? "ON" : "OFF"));
+    displayMainScreen();
   }
 }
 
 void updateAwayMode() {
   if (Firebase.RTDB.getBool(&fbdo, "/awayMode")) {
-    awayMode = fbdo.boolData();
-    if (!enteringPassword && !doorUnlocked) {
-      lcd.setCursor(0, 1);
-      lcd.print("Away: " + String(awayMode ? "ON" : "OFF") + " ");
+    bool newAwayMode = fbdo.boolData();
+    if (newAwayMode != awayMode) {
+      awayMode = newAwayMode;
+      if (!enteringPassword && !doorUnlocked) {
+        displayMainScreen();
+      }
     }
   } else {
     Serial.println("Error fetching awayMode: " + fbdo.errorReason());
