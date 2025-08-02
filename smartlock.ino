@@ -74,7 +74,7 @@ const unsigned long LOCKOUT_DURATION_MS = 3 * 60 * 1000;
 bool doorUnlocked = false;
 unsigned long unlockStartTime = 0;
 unsigned long lastFirebaseSyncTime = 0; 
-const unsigned long firebaseSyncInterval = 1000; // Reduced interval for faster response
+const unsigned long firebaseSyncInterval = 1000;
 
 // Password masking variables
 const unsigned long MASK_DELAY = 1000;
@@ -104,7 +104,9 @@ struct RFIDCardData {
 };
 
 RFIDCardData localAllowedRFIDCards[MAX_RFID_CARDS];
+RFIDCardData tempRFIDCards[MAX_RFID_CARDS];
 int currentRFIDCount = 0; 
+int tempRFIDCount = 0;
 bool ntpSynced = false;
 bool wifiConnectedStatusDisplayed = false; 
 
@@ -140,7 +142,7 @@ void clearEEPROMData();
 void syncFirebaseDataToEEPROM(); 
 void saveLockoutStateToEEPROM();
 void loadLockoutStateFromEEPROM();
-void checkFirebaseLockStatus(); // New function
+void checkFirebaseLockStatus();
 
 // Get current timestamp from NTP
 time_t getCurrentTimestamp() {
@@ -368,6 +370,7 @@ void setup() {
 }
 
 void loop() {
+    // Kiểm tra trạng thái WiFi
     if (WiFi.status() == WL_CONNECTED) {
         if (!wifiConnectedStatusDisplayed) {
             Serial.println("WiFi reconnected during runtime.");
@@ -388,7 +391,9 @@ void loop() {
                 Firebase.reconnectWiFi(true);
                 if (Firebase.ready()) {
                     Serial.println("Firebase initialized during runtime.");
-                    syncFirebaseDataToEEPROM();
+                    if (!enteringPassword) { // Chỉ đồng bộ nếu không nhập mật khẩu
+                        syncFirebaseDataToEEPROM();
+                    }
                 } else {
                     Serial.println("Firebase initialization failed during runtime: " + fbdo.errorReason());
                 }
@@ -408,15 +413,27 @@ void loop() {
         }
     }
 
+    // Xử lý trạng thái khóa
     handleLockoutState();
-
     if (isLockedOut) {
         return; 
     }
 
-    if (WiFi.status() == WL_CONNECTED && Firebase.ready() && millis() - lastFirebaseSyncTime > firebaseSyncInterval) {
+    // Xử lý nhập mật khẩu từ keypad
+    static String inputPassword = "";
+    char key = keypad.getKey();
+
+    // Xử lý các tác vụ không liên quan đến Firebase
+    handleServoAutoLock();
+    handleRFID();
+    if (enteringPassword) {
+        handlePasswordMasking(inputPassword);
+    }
+
+    // Chỉ thực hiện Firebase sync khi không nhập mật khẩu
+    if (!enteringPassword && WiFi.status() == WL_CONNECTED && Firebase.ready() && millis() - lastFirebaseSyncTime > firebaseSyncInterval) {
         syncFirebaseDataToEEPROM(); 
-        checkFirebaseLockStatus(); // Check lock status
+        checkFirebaseLockStatus();
         bool firebaseLockedOutState = false;
         if (Firebase.RTDB.getBool(&fbdo, "/lockout/isLockedOut")) {
             firebaseLockedOutState = fbdo.boolData();
@@ -439,13 +456,7 @@ void loop() {
         lastFirebaseSyncTime = millis();
     }
 
-    char key = keypad.getKey();
-    static String inputPassword = "";
-
-    handleServoAutoLock();
-    handleRFID();
-    handlePasswordMasking(inputPassword);
-
+    // Xử lý phím bấm từ keypad
     if (key) {
         if (!enteringPassword && !addingRFID) {
             if (key == 'A') {
@@ -497,7 +508,6 @@ void checkFirebaseLockStatus() {
                 displayText("Remote Unlock", "Opening Door...", 1, true);
                 unlockDoor();
                 logAccess("Remote Unlock", true, "App");
-                // Reset isOpen to false on Firebase
                 Firebase.RTDB.setBool(&fbdo, "/lockStatus/isOpen", false);
                 Serial.println("Door unlocked remotely via Firebase.");
             }
@@ -695,16 +705,10 @@ void verifyAddRFIDPassword(String input) {
 }
 
 // Sync Firebase data to EEPROM
-// Định nghĩa mảng tạm cho đồng bộ RFID
-RFIDCardData tempRFIDCards[MAX_RFID_CARDS];
-int tempRFIDCount = 0;
-
-// Hàm đồng bộ dữ liệu từ Firebase xuống EEPROM (đã sửa đổi)
 void syncFirebaseDataToEEPROM() {
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
         Serial.println("Starting Firebase data sync to EEPROM...");
 
-        // 1. Cập nhật Master Password
         String newPass = getFirebaseData("/masterPassword");
         if (newPass != "" && newPass != masterPassword) {
             masterPassword = newPass;
@@ -712,7 +716,6 @@ void syncFirebaseDataToEEPROM() {
             Serial.println("Master password updated from Firebase and saved to EEPROM.");
         }
 
-        // 2. Cập nhật Away Mode
         if (Firebase.RTDB.getBool(&fbdo, "/awayMode")) {
             bool newAwayMode = fbdo.boolData();
             if (newAwayMode != awayMode) {
@@ -727,7 +730,6 @@ void syncFirebaseDataToEEPROM() {
             Serial.println("Failed to get Away Mode from Firebase: " + fbdo.errorReason());
         }
 
-        // 3. Cập nhật OTP
         String otpCode = getFirebaseData("/otp/code");
         if (otpCode != "") otp = otpCode;
 
@@ -741,9 +743,7 @@ void syncFirebaseDataToEEPROM() {
         String otpUsed = getFirebaseData("/otp/used");
         if (otpUsed == "true") otp = "";
 
-        // 4. Đồng bộ danh sách RFID từ Firebase
         Serial.println("Syncing all RFID Cards from Firebase to temporary buffer...");
-        // Reset bộ đệm tạm
         for (int i = 0; i < MAX_RFID_CARDS; i++) {
             tempRFIDCards[i] = {"", "", false};
         }
@@ -768,7 +768,6 @@ void syncFirebaseDataToEEPROM() {
                         if (tempRFIDCount < MAX_RFID_CARDS) {
                             String cardID = cardIDData.stringValue;
                             String cardName = cardNameData.stringValue;
-                            // Đảm bảo cardID và name hợp lệ
                             if (cardID.length() > 0 && cardName.length() > 0) {
                                 strncpy(tempRFIDCards[tempRFIDCount].cardID, cardID.c_str(), RFID_ID_LEN - 1);
                                 tempRFIDCards[tempRFIDCount].cardID[RFID_ID_LEN - 1] = '\0';
@@ -789,15 +788,14 @@ void syncFirebaseDataToEEPROM() {
                 }
             }
             json.iteratorEnd();
-            syncSuccess = true; // Đánh dấu đồng bộ thành công
+            syncSuccess = true;
         } else {
             Serial.println("Failed to get RFID cards from Firebase: " + fbdo.errorReason());
         }
 
-        // Chỉ ghi vào EEPROM nếu đồng bộ thành công
         if (syncSuccess && tempRFIDCount > 0) {
             Serial.println("Sync successful. Clearing EEPROM and saving new RFID data...");
-            clearAllRFIDCardsInEEPROM(); // Xóa EEPROM chỉ khi đã có dữ liệu mới
+            clearAllRFIDCardsInEEPROM();
             for (int i = 0; i < tempRFIDCount; i++) {
                 saveRFIDCardToEEPROM(String(tempRFIDCards[i].cardID), String(tempRFIDCards[i].name), i);
             }
@@ -811,6 +809,7 @@ void syncFirebaseDataToEEPROM() {
         Serial.println("Cannot sync Firebase data. No WiFi or Firebase not ready.");
     }
 }
+
 // Check password
 void checkPassword(String input) {
     bool valid = false;
@@ -962,13 +961,34 @@ void exitLockoutMode() {
     Serial.println("System exited lockout mode.");
     saveLockoutStateToEEPROM();
 
+    // Kiểm tra kết nối trước khi gửi request Firebase
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
-        Firebase.RTDB.setBool(&fbdo, "/lockout/isLockedOut", false);
-        Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0);
-        Firebase.RTDB.setInt(&fbdo, "/lockout/failedAttempts", 0);
-        Serial.println("Lockout state exit pushed to Firebase.");
+        bool success = true;
+        // Gửi từng request riêng lẻ với kiểm tra lỗi
+        if (!Firebase.RTDB.setBool(&fbdo, "/lockout/isLockedOut", false)) {
+            Serial.println("Failed to set lockout/isLockedOut: " + fbdo.errorReason());
+            success = false;
+        }
+        if (!Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0)) {
+            Serial.println("Failed to set lockout/startTime: " + fbdo.errorReason());
+            success = false;
+        }
+        if (!Firebase.RTDB.setInt(&fbdo, "/lockout/failedAttempts", 0)) {
+            Serial.println("Failed to set lockout/failedAttempts: " + fbdo.errorReason());
+            success = false;
+        }
+        if (success) {
+            Serial.println("Lockout state exit pushed to Firebase.");
+        } else {
+            Serial.println("Some Firebase updates failed. Will retry on next sync.");
+        }
+    } else {
+        Serial.println("Cannot push lockout state to Firebase: No WiFi or Firebase not ready.");
     }
-    displayMainScreen();
+    
+    if (!enteringPassword && !addingRFID && !doorUnlocked) {
+        displayMainScreen();
+    }
 }
 
 void handleLockoutState() {
@@ -978,12 +998,12 @@ void handleLockoutState() {
             unsigned long elapsedSecondsNTP = currentNTPTimestamp - lockoutStartTimeNTP;
             unsigned long elapsedMillisNTP = elapsedSecondsNTP * 1000UL;
             if (elapsedMillisNTP >= LOCKOUT_DURATION_MS) {
-                exitLockoutMode();
+                exitLockoutMode(); // Thoát khóa và cập nhật Firebase
+                return; // Thoát ngay để tránh hiển thị tiếp
             } else {
                 lockoutStartTimeMillis = millis() - elapsedMillisNTP;
                 unsigned long remainingTimeSec = (LOCKOUT_DURATION_MS - elapsedMillisNTP) / 1000;
                 
-                // Sửa đổi phần hiển thị
                 display.clearDisplay();
                 display.setTextColor(SSD1306_WHITE);
                 
@@ -1002,7 +1022,7 @@ void handleLockoutState() {
                 String line2 = "Try in " + String(remainingTimeSec) + "s";
                 display.getTextBounds(line2, 0, 0, &x1, &y1, &w, &h);
                 x = (SCREEN_WIDTH - w) / 2;
-                display.setCursor(x, 35); // Đặt vị trí dòng 2
+                display.setCursor(x, 35);
                 display.print(line2);
                 
                 display.display();
@@ -1012,6 +1032,7 @@ void handleLockoutState() {
         }
     }
 }
+
 // EEPROM functions
 void saveMasterPasswordToEEPROM() {
     EEPROM.writeString(EEPROM_MASTER_PASSWORD_ADDR, masterPassword);
