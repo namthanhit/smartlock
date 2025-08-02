@@ -7,7 +7,7 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <ESP32Servo.h>
-#include "time.h" // Thư viện để làm việc với time_t và NTP
+#include "time.h"
 #include <EEPROM.h>
 
 // WiFi credentials
@@ -49,7 +49,7 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 Servo doorServo;
 const int SERVO_UNLOCK_ANGLE = 90;
 const int SERVO_LOCK_ANGLE = 0;
-const unsigned long SERVO_OPEN_TIME = 3000; // Thời gian cửa mở trước khi tự động khóa
+const unsigned long SERVO_OPEN_TIME = 3000;
 
 // Firebase objects
 FirebaseData fbdo;
@@ -61,21 +61,20 @@ String masterPassword = "123456";
 String otp = "";
 unsigned long otpValidUntil = 0;
 bool awayMode = true; 
-const int maxAttempts = 5; // Số lần thử sai tối đa trước khi bị khóa
+const int maxAttempts = 5;
 int failedAttempts = 0;
 
-// Biến cho tính năng khóa tạm thời
+// Lockout variables
 bool isLockedOut = false;
-unsigned long lockoutStartTimeMillis = 0; // Thời điểm bắt đầu khóa tính bằng millis() (dùng cho tính toán hiển thị khi đang chạy)
-time_t lockoutStartTimeNTP = 0; // Thời điểm bắt đầu khóa tính bằng timestamp NTP (dùng để lưu trữ và so sánh)
+unsigned long lockoutStartTimeMillis = 0;
+time_t lockoutStartTimeNTP = 0;
+const unsigned long LOCKOUT_DURATION_MS = 3 * 60 * 1000;
 
-const unsigned long LOCKOUT_DURATION_MS = 3 * 60 * 1000; // Thời gian khóa: 3 phút * 60 giây/phút * 1000 ms/giây
-
-bool enteringPassword = false;
+// Lock status variables
 bool doorUnlocked = false;
 unsigned long unlockStartTime = 0;
 unsigned long lastFirebaseSyncTime = 0; 
-const unsigned long firebaseSyncInterval = 5000; // Khoảng thời gian đồng bộ Firebase
+const unsigned long firebaseSyncInterval = 1000; // Reduced interval for faster response
 
 // Password masking variables
 const unsigned long MASK_DELAY = 1000;
@@ -85,6 +84,7 @@ bool shouldMask = false;
 // RFID Adding variables
 bool addingRFID = false;
 String newRFIDCardID = "";
+bool enteringPassword = false;
 
 // EEPROM Configuration
 #define EEPROM_SIZE 512 
@@ -94,31 +94,24 @@ String newRFIDCardID = "";
 #define MAX_RFID_CARDS 5            
 #define RFID_ID_LEN 16              
 #define RFID_NAME_LEN 32            
-
-// Địa chỉ EEPROM cho trạng thái khóa và timestamp (chỉ lưu NTP timestamp)
 #define EEPROM_LOCKED_OUT_ADDR (EEPROM_RFID_START_ADDR + (MAX_RFID_CARDS * sizeof(RFIDCardData))) 
-#define EEPROM_LOCKOUT_START_TIME_NTP_ADDR (EEPROM_LOCKED_OUT_ADDR + sizeof(bool)) // Lưu timestamp NTP
+#define EEPROM_LOCKOUT_START_TIME_NTP_ADDR (EEPROM_LOCKED_OUT_ADDR + sizeof(bool))
 
-// Cấu trúc để lưu trữ thông tin thẻ RFID
 struct RFIDCardData {
     char cardID[RFID_ID_LEN];
     char name[RFID_NAME_LEN];
-    bool isValid; // Đánh dấu thẻ có hợp lệ hay không
+    bool isValid;
 };
 
-// Mảng chứa các thẻ RFID được phép lưu cục bộ
 RFIDCardData localAllowedRFIDCards[MAX_RFID_CARDS];
 int currentRFIDCount = 0; 
-
-// Biến để theo dõi trạng thái đồng bộ NTP
 bool ntpSynced = false;
-// Biến để theo dõi trạng thái kết nối Wi-Fi (tránh spam console/display)
 bool wifiConnectedStatusDisplayed = false; 
 
-// --- FUNCTION PROTOTYPES ---
+// Function prototypes
 void logAccess(String method, bool success, String userName = "");
 time_t getCurrentTimestamp();
-bool isNTPTimeValid(); // New function to check NTP validity
+bool isNTPTimeValid();
 void displayText(String line1, String line2, int textSize, bool center);
 void displayPasswordInput(String password);
 void displayMainScreen();
@@ -132,14 +125,9 @@ void checkPassword(String input);
 String getFirebaseData(String path);
 void updateOtpHistory(String otpCode);
 void handlePasswordMasking(String& inputPassword); 
-void reconnectWiFiBackground(); // New function for background WiFi reconnect
-
-// Prototype cho các hàm xử lý khóa
 void enterLockoutMode();
 void exitLockoutMode();
 void handleLockoutState();
-
-// Các hàm EEPROM
 void saveMasterPasswordToEEPROM();
 void loadMasterPasswordFromEEPROM();
 void saveAwayModeToEEPROM();
@@ -150,10 +138,9 @@ void loadAllRFIDCardsFromEEPROM();
 bool checkRFIDLocal(String cardID, String& cardName);
 void clearEEPROMData(); 
 void syncFirebaseDataToEEPROM(); 
-
-// Prototype cho các hàm EEPROM lockout
 void saveLockoutStateToEEPROM();
 void loadLockoutStateFromEEPROM();
+void checkFirebaseLockStatus(); // New function
 
 // Get current timestamp from NTP
 time_t getCurrentTimestamp() {
@@ -162,14 +149,13 @@ time_t getCurrentTimestamp() {
     return now;
 }
 
-// Check if NTP time is considered valid (beyond EPOCH start + few hours)
-// Đảm bảo thời gian hợp lệ (lớn hơn 2 tiếng từ EPOCH để loại trừ giá trị 0 hoặc giá trị sai)
+// Check if NTP time is valid
 bool isNTPTimeValid() {
     time_t now = time(nullptr);
     return (now > 8 * 3600); 
 }
 
-// Hàm hiển thị văn bản trên màn hình OLED
+// Display text on OLED
 void displayText(String line1, String line2 = "", int textSize = 1, bool center = false) {
     display.clearDisplay();
     display.setTextSize(textSize);
@@ -195,14 +181,14 @@ void displayText(String line1, String line2 = "", int textSize = 1, bool center 
             int x = (SCREEN_WIDTH - w) / 2;
             display.setCursor(x, 30);
         } else {
-            display.setCursor(0, (textSize == 1 ? 10 : 20)); // Vị trí dòng 2 tùy thuộc kích thước chữ
+            display.setCursor(0, (textSize == 1 ? 10 : 20));
         }
         display.println(line2);
     }
     display.display();
 }
 
-// Hàm hiển thị input mật khẩu trên OLED
+// Display password input on OLED
 void displayPasswordInput(String password) {
     display.clearDisplay();
     display.setTextSize(1);
@@ -216,13 +202,11 @@ void displayPasswordInput(String password) {
 
     if (password.length() > 0) {
         if (shouldMask && millis() - lastKeyPressTime < MASK_DELAY) {
-            // Hiển thị ký tự cuối cùng, các ký tự trước đó là '*'
             for (int i = 0; i < password.length() - 1; i++) {
                 display.print("*");
             }
             display.print(password.charAt(password.length() - 1));
         } else {
-            // Hiển thị tất cả là '*'
             for (int i = 0; i < password.length(); i++) {
                 display.print("*");
             }
@@ -231,7 +215,7 @@ void displayPasswordInput(String password) {
     display.display();
 }
 
-// Hàm hiển thị màn hình chính
+// Display main screen
 void displayMainScreen() {
     display.clearDisplay();
     display.setTextSize(2);
@@ -256,12 +240,11 @@ void displayMainScreen() {
 
 void setup() {
     Serial.begin(115200);
-    Wire.begin(16, 17); // SDA, SCL
+    Wire.begin(16, 17);
 
-    // Initialize OLED
     if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
         Serial.println(F("SSD1306 allocation failed"));
-        for (;;); // Don't proceed, loop forever
+        for (;;);
     }
     display.clearDisplay();
     display.display();
@@ -269,19 +252,17 @@ void setup() {
     SPI.begin();
     mfrc522.PCD_Init();
 
-    // Servo setup
     doorServo.attach(SERVO_PIN);
-    doorServo.write(SERVO_LOCK_ANGLE); // Khóa cửa khi khởi động
+    doorServo.write(SERVO_LOCK_ANGLE);
 
     displayText("Smart Lock Init", "Loading Config...", 1, true);
     delay(1000);
 
-    // Khởi tạo EEPROM và tải dữ liệu cục bộ
     EEPROM.begin(EEPROM_SIZE);
     loadMasterPasswordFromEEPROM();
     loadAwayModeFromEEPROM();
-    loadAllRFIDCardsFromEEPROM(); 
-    // loadLockoutStateFromEEPROM() sẽ được gọi sau khi WiFi/NTP có thể thiết lập
+    loadAllRFIDCardsFromEEPROM();
+    loadLockoutStateFromEEPROM();
 
     Serial.print("Master Password (EEPROM): "); Serial.println(masterPassword);
     Serial.print("Away Mode (EEPROM): "); Serial.println(awayMode ? "ON" : "OFF");
@@ -293,21 +274,16 @@ void setup() {
         }
     }
 
-    // Cấu hình Wi-Fi cho tự động kết nối và ghi nhớ
     WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true); // Tự động kết nối lại khi mất kết nối
-    WiFi.persistent(true); // Ghi nhớ thông tin kết nối Wi-Fi vào NVS
-
-    // Cố gắng kết nối Wi-Fi lần đầu
-    Serial.print("Connecting to WiFi: ");
-    Serial.println(WIFI_SSID);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
+    Serial.print("Connecting to WiFi: "); Serial.println(WIFI_SSID);
     displayText("Connecting WiFi", "", 1, true);
     
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     int dotCount = 0;
     unsigned long connectTimeout = millis();
-    // Chờ kết nối Wi-Fi ban đầu trong 15 giây. Sau đó, nó sẽ kết nối ngầm.
     while (WiFi.status() != WL_CONNECTED && (millis() - connectTimeout < 15000)) { 
         delay(500);
         dotCount++;
@@ -321,15 +297,12 @@ void setup() {
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("WiFi connected!");
         displayText("WiFi Connected!", "", 1, true);
-        wifiConnectedStatusDisplayed = true; // Đánh dấu đã hiển thị
+        wifiConnectedStatusDisplayed = true;
         delay(1000);
-        // Cập nhật thời gian từ NTP server
-        Serial.println("Setting up NTP time...");
-        configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov", "time.google.com"); 
 
+        configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov", "time.google.com"); 
         time_t now = time(nullptr);
         int retryCount = 0;
-        // Chờ NTP đồng bộ thời gian (tối đa 20 lần retry)
         while (!isNTPTimeValid() && retryCount < 20) { 
             delay(500);
             Serial.print(".");
@@ -343,25 +316,22 @@ void setup() {
             ntpSynced = false;
             delay(1000);
         } else {
-            Serial.print("Current time: ");
-            Serial.println(ctime(&now));
+            Serial.print("Current time: "); Serial.println(ctime(&now));
             displayText("Time Synced!", "", 1, true);
             ntpSynced = true;
             delay(500);
         }
 
-        // Khởi tạo Firebase
         config.api_key = API_KEY;
         config.database_url = DATABASE_URL;
         config.signer.tokens.legacy_token = DATABASE_SECRET;
         Firebase.begin(&config, &auth);
-        Firebase.reconnectWiFi(true); // Giúp Firebase tự động kết nối lại khi mất mạng (quan trọng)
+        Firebase.reconnectWiFi(true);
         
         displayText("Connecting", "Firebase...", 1, true);
 
         dotCount = 0;
         unsigned long firebaseConnectStartTime = millis();
-        // Chờ Firebase sẵn sàng (tối đa 5 giây)
         while (!Firebase.ready() && (millis() - firebaseConnectStartTime < 5000)) { 
             delay(500);
             dotCount++;
@@ -375,7 +345,7 @@ void setup() {
         if (Firebase.ready()) {
             displayText("Firebase Ready", "", 1, true);
             delay(1000);
-            syncFirebaseDataToEEPROM(); // Đồng bộ dữ liệu từ Firebase xuống EEPROM ngay lập tức
+            syncFirebaseDataToEEPROM();
             Serial.println("Firebase ready and data synced.");
         } else {
             displayText("Firebase Fail", "Using Local Data", 1, true);
@@ -385,105 +355,79 @@ void setup() {
     } else {
         Serial.println("Failed to connect to WiFi. Running in offline mode.");
         displayText("WiFi Fail", "Using Local Data", 1, true);
-        wifiConnectedStatusDisplayed = false; // Đánh dấu chưa kết nối
-        ntpSynced = false; // Đảm bảo ntpSynced là false nếu không có wifi
+        wifiConnectedStatusDisplayed = false;
+        ntpSynced = false;
         delay(1000);
     }
 
-    // Tải và xử lý trạng thái khóa SAU KHI cố gắng đồng bộ NTP/WiFi
-    loadLockoutStateFromEEPROM(); 
-
     if (isLockedOut) {
-        handleLockoutState(); // Cập nhật màn hình nếu đang khóa
+        handleLockoutState();
     } else {
-        displayMainScreen(); // Hiển thị màn hình chính nếu không khóa
+        displayMainScreen();
     }
 }
 
 void loop() {
-    // Luôn kiểm tra trạng thái Wi-Fi và NTP một cách ngầm
-    // Nếu Wi-Fi bị mất, ESP32 sẽ tự động cố gắng kết nối lại nhờ WiFi.setAutoReconnect(true)
     if (WiFi.status() == WL_CONNECTED) {
         if (!wifiConnectedStatusDisplayed) {
             Serial.println("WiFi reconnected during runtime.");
             wifiConnectedStatusDisplayed = true;
-            // Không hiển thị popup "WiFi Connected!" nữa, chỉ log ra serial
-            // Cập nhật lại màn hình chính nếu không có hoạt động khác
             if (!enteringPassword && !doorUnlocked && !addingRFID && !isLockedOut) {
                 displayMainScreen();
             }
         }
         
-        // Cố gắng đồng bộ NTP nếu chưa synced
-        if (!ntpSynced) {
-            if (isNTPTimeValid()) {
-                Serial.println("NTP synced during runtime!");
-                ntpSynced = true;
-                // Nếu Firebase chưa được khởi tạo, khởi tạo ngay bây giờ
-                if (!Firebase.ready()) { 
-                     // Cần set lại config vì có thể nó đã được clear khi Firebase không sẵn sàng lúc đầu
-                     config.api_key = API_KEY; 
-                     config.database_url = DATABASE_URL;
-                     config.signer.tokens.legacy_token = DATABASE_SECRET;
-                     Firebase.begin(&config, &auth);
-                     Firebase.reconnectWiFi(true);
-                     if (Firebase.ready()) {
-                        Serial.println("Firebase initialized during runtime.");
-                        syncFirebaseDataToEEPROM();
-                     } else {
-                        Serial.println("Firebase initialization failed during runtime: " + fbdo.errorReason());
-                     }
+        if (!ntpSynced && isNTPTimeValid()) {
+            Serial.println("NTP synced during runtime!");
+            ntpSynced = true;
+            if (!Firebase.ready()) { 
+                config.api_key = API_KEY; 
+                config.database_url = DATABASE_URL;
+                config.signer.tokens.legacy_token = DATABASE_SECRET;
+                Firebase.begin(&config, &auth);
+                Firebase.reconnectWiFi(true);
+                if (Firebase.ready()) {
+                    Serial.println("Firebase initialized during runtime.");
+                    syncFirebaseDataToEEPROM();
+                } else {
+                    Serial.println("Firebase initialization failed during runtime: " + fbdo.errorReason());
                 }
-                // Nếu đang bị khóa và NTP vừa đồng bộ, cần hiệu chỉnh lại lockoutStartTimeMillis
-                if (isLockedOut) {
-                    Serial.println("Re-evaluating lockout state after NTP sync.");
-                    // Cập nhật lockoutStartTimeMillis dựa trên thời gian NTP đã trôi qua
-                    unsigned long elapsedSecondsNTP = getCurrentTimestamp() - lockoutStartTimeNTP;
-                    lockoutStartTimeMillis = millis() - (elapsedSecondsNTP * 1000UL); // Đảm bảo thời gian còn lại khớp với NTP
-                    handleLockoutState(); // Kích hoạt lại để kiểm tra thời gian hết khóa
-                }
-            } else {
-                // Nếu NTP chưa hợp lệ, có thể thử configTime lại hoặc đợi chu kỳ tiếp theo
-                // configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov", "time.google.com"); 
-                // Cần 1 delay nhỏ hoặc chỉ gọi một lần trong 1 khoảng thời gian
+            }
+            if (isLockedOut) {
+                Serial.println("Re-evaluating lockout state after NTP sync.");
+                unsigned long elapsedSecondsNTP = getCurrentTimestamp() - lockoutStartTimeNTP;
+                lockoutStartTimeMillis = millis() - (elapsedSecondsNTP * 1000UL);
+                handleLockoutState();
             }
         }
-    } else { // WiFi.status() != WL_CONNECTED
+    } else {
         if (wifiConnectedStatusDisplayed) {
             Serial.println("WiFi disconnected.");
             wifiConnectedStatusDisplayed = false;
-            ntpSynced = false; // Đánh dấu NTP chưa synced
-            // Không hiển thị thông báo "WiFi Disconnected!" lên OLED
-            // Giữ nguyên màn hình hiện tại (main screen, password input, lockout, etc.)
+            ntpSynced = false;
         }
-        // ESP32 tự động reconnect, không cần gọi WiFi.begin() lại ở đây.
     }
 
-    handleLockoutState(); // Xử lý trạng thái khóa ở đầu loop
+    handleLockoutState();
 
     if (isLockedOut) {
-        // Nếu đang khóa, bỏ qua tất cả các đầu vào và hoạt động khác
         return; 
     }
 
-    // Chỉ thử đồng bộ Firebase khi có WiFi và Firebase sẵn sàng
     if (WiFi.status() == WL_CONNECTED && Firebase.ready() && millis() - lastFirebaseSyncTime > firebaseSyncInterval) {
         syncFirebaseDataToEEPROM(); 
-        
-        // Đồng bộ trạng thái lockout lên Firebase
-        // Thêm kiểm tra để tránh gửi dữ liệu không cần thiết nếu không có thay đổi
+        checkFirebaseLockStatus(); // Check lock status
         bool firebaseLockedOutState = false;
         if (Firebase.RTDB.getBool(&fbdo, "/lockout/isLockedOut")) {
             firebaseLockedOutState = fbdo.boolData();
         }
-
-        if (firebaseLockedOutState != isLockedOut) { // Chỉ gửi nếu có thay đổi trạng thái
+        if (firebaseLockedOutState != isLockedOut) {
             Firebase.RTDB.setBool(&fbdo, "/lockout/isLockedOut", isLockedOut);
             if (isLockedOut) {
                 if (isNTPTimeValid()) {
                     Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", (int)lockoutStartTimeNTP); 
                 } else {
-                    Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0); // Gửi 0 nếu không có NTP hợp lệ
+                    Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0);
                 }
             } else {
                 Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0);
@@ -544,7 +488,26 @@ void loop() {
     }
 }
 
-// Hàm xử lý việc che mật khẩu trên màn hình OLED
+// New function to check Firebase lock status
+void checkFirebaseLockStatus() {
+    if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
+        if (Firebase.RTDB.getBool(&fbdo, "/lockStatus/isOpen")) {
+            bool isOpen = fbdo.boolData();
+            if (isOpen && !doorUnlocked) {
+                displayText("Remote Unlock", "Opening Door...", 1, true);
+                unlockDoor();
+                logAccess("Remote Unlock", true, "App");
+                // Reset isOpen to false on Firebase
+                Firebase.RTDB.setBool(&fbdo, "/lockStatus/isOpen", false);
+                Serial.println("Door unlocked remotely via Firebase.");
+            }
+        } else {
+            Serial.println("Failed to read lockStatus/isOpen: " + fbdo.errorReason());
+        }
+    }
+}
+
+// Handle password masking
 void handlePasswordMasking(String& inputPassword) {
     if (enteringPassword && shouldMask && inputPassword.length() > 0) {
         if (millis() - lastKeyPressTime >= MASK_DELAY) {
@@ -554,39 +517,34 @@ void handlePasswordMasking(String& inputPassword) {
     }
 }
 
-// Hàm tự động khóa cửa sau một thời gian
+// Auto-lock door after time
 void handleServoAutoLock() {
     if (doorUnlocked && (millis() - unlockStartTime >= SERVO_OPEN_TIME)) {
         lockDoor();
     }
 }
 
-// Mở cửa
+// Unlock door
 void unlockDoor() {
-    doorServo.attach(SERVO_PIN); // Đảm bảo servo được gắn
+    doorServo.attach(SERVO_PIN);
     doorServo.write(SERVO_UNLOCK_ANGLE);
     doorUnlocked = true;
     unlockStartTime = millis();
 }
 
-// Khóa cửa
+// Lock door
 void lockDoor() {
-    doorServo.attach(SERVO_PIN); // Đảm bảo servo được gắn
+    doorServo.attach(SERVO_PIN);
     doorServo.write(SERVO_LOCK_ANGLE);
     doorUnlocked = false;
-
-    if (!enteringPassword && !addingRFID && !isLockedOut) { // Chỉ quay về màn hình chính nếu không bị khóa
+    if (!enteringPassword && !addingRFID && !isLockedOut) {
         displayMainScreen();
     }
 }
 
-// Xử lý quét thẻ RFID
+// Handle RFID scanning
 void handleRFID() {
-    if (!mfrc522.PICC_IsNewCardPresent()) {
-        return;
-    }
-
-    if (!mfrc522.PICC_ReadCardSerial()) {
+    if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) {
         return;
     }
 
@@ -605,7 +563,7 @@ void handleRFID() {
         enteringPassword = true;
         lastKeyPressTime = millis();
         shouldMask = false;
-        displayPasswordInput(""); // Xóa input password cũ
+        displayPasswordInput("");
     } else {
         checkRFIDCard(cardID);
     }
@@ -614,33 +572,28 @@ void handleRFID() {
     mfrc522.PCD_StopCrypto1();
 }
 
-// Kiểm tra thẻ RFID
+// Check RFID card
 void checkRFIDCard(String cardID) {
     bool cardAllowed = false;
-    String cardName = "Unknown User"; 
+    String cardName = "Unknown User";
 
-    // Ưu tiên kiểm tra Firebase nếu có mạng và Firebase sẵn sàng
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
-        Serial.println("Checking RFID from Firebase (online mode).");
+        Serial.println("Checking RFID from Firebase.");
         if (Firebase.RTDB.getJSON(&fbdo, "/allowedCards")) {
             FirebaseJson &json = fbdo.jsonObject();
             size_t count = json.iteratorBegin();
-
             for (size_t i = 0; i < count; i++) {
                 String key, value;
                 int type;
                 json.iteratorGet(i, type, key, value);
-
                 if (type == FirebaseJson::JSON_OBJECT) {
                     FirebaseJson cardJson;
                     cardJson.setJsonData(value);
                     FirebaseJsonData cardData;
-
                     if (cardJson.get(cardData, "cardID")) {
                         String dbCardID = cardData.stringValue;
                         dbCardID.replace(" ", "");
                         dbCardID.toUpperCase();
-
                         if (dbCardID == cardID) {
                             cardAllowed = true;
                             if (cardJson.get(cardData, "name")) {
@@ -652,12 +605,9 @@ void checkRFIDCard(String cardID) {
                 }
             }
             json.iteratorEnd();
-        } else {
-             Serial.println(fbdo.errorReason()); // In ra lỗi nếu không lấy được JSON
         }
     } else {
-        // Nếu không có mạng hoặc Firebase không sẵn sàng, kiểm tra dữ liệu cục bộ
-        Serial.println("Firebase not ready. Checking local RFID cards (offline mode).");
+        Serial.println("Checking local RFID cards.");
         cardAllowed = checkRFIDLocal(cardID, cardName);
     }
 
@@ -671,7 +621,7 @@ void checkRFIDCard(String cardID) {
         } else {
             displayText("Access Granted", "Welcome, " + cardName, 1, true);
             logAccess("RFID - " + cardName, true, cardName);
-            failedAttempts = 0; // Reset số lần thử sai khi truy cập thành công
+            failedAttempts = 0;
             unlockDoor();
         }
     } else {
@@ -682,41 +632,37 @@ void checkRFIDCard(String cardID) {
             failedAttempts++;
             displayText("Invalid Card!", "Attempts: " + String(failedAttempts), 1, true);
             logAccess("Invalid RFID - " + cardName, false, cardName);
-
             if (failedAttempts >= maxAttempts) {
-                enterLockoutMode(); // Kích hoạt chế độ khóa tạm thời
+                enterLockoutMode();
             }
         }
     }
 
     delay(2000);
-    if (!doorUnlocked && !isLockedOut) { // Chỉ quay lại màn hình chính nếu không khóa
+    if (!doorUnlocked && !isLockedOut) {
         displayMainScreen();
     }
 }
 
-// Xác minh mật khẩu để thêm thẻ RFID mới
+// Verify password for adding RFID
 void verifyAddRFIDPassword(String input) {
-    if (input == masterPassword) { 
+    if (input == masterPassword) {
         if (newRFIDCardID != "") {
-            // Cố gắng lưu vào Firebase nếu có mạng
             if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
                 String path = "/allowedCards/" + newRFIDCardID;
                 FirebaseJson json;
                 json.set("cardID", newRFIDCardID);
-                json.set("name", newRFIDCardID); // Mặc định tên là CardID, có thể thay đổi sau
+                json.set("name", newRFIDCardID);
                 json.set("addedAt", (int)getCurrentTimestamp());
                 if (Firebase.RTDB.setJSON(&fbdo, path, &json)) {
                     displayText("RFID Added!", newRFIDCardID, 1, true);
                     logAccess("Add RFID Success - " + newRFIDCardID, true, newRFIDCardID);
-                    // *** QUAN TRỌNG: Đồng bộ lại toàn bộ danh sách xuống EEPROM ngay lập tức ***
-                    syncFirebaseDataToEEPROM(); 
+                    syncFirebaseDataToEEPROM();
                 } else {
                     displayText("Add RFID Failed!", fbdo.errorReason(), 1, true);
                     logAccess("Add RFID Fail", false);
                 }
             } else {
-                // Nếu không có mạng, chỉ lưu vào EEPROM (chế độ offline)
                 displayText("Offline Add RFID!", newRFIDCardID, 1, true);
                 int emptyIndex = -1;
                 for(int i = 0; i < MAX_RFID_CARDS; i++) {
@@ -727,8 +673,8 @@ void verifyAddRFIDPassword(String input) {
                 }
                 if(emptyIndex != -1) {
                     saveRFIDCardToEEPROM(newRFIDCardID, newRFIDCardID, emptyIndex);
-                    EEPROM.commit(); // Commit ngay nếu thêm offline
-                    currentRFIDCount++; // Tăng số lượng thẻ cục bộ
+                    EEPROM.commit();
+                    currentRFIDCount++;
                     logAccess("Add RFID Offline - " + newRFIDCardID, true, newRFIDCardID);
                 } else {
                     displayText("EEPROM Full!", "Cannot Add Offline", 1, true);
@@ -748,7 +694,12 @@ void verifyAddRFIDPassword(String input) {
     displayMainScreen();
 }
 
-// Hàm tổng hợp việc đồng bộ dữ liệu từ Firebase xuống EEPROM
+// Sync Firebase data to EEPROM
+// Định nghĩa mảng tạm cho đồng bộ RFID
+RFIDCardData tempRFIDCards[MAX_RFID_CARDS];
+int tempRFIDCount = 0;
+
+// Hàm đồng bộ dữ liệu từ Firebase xuống EEPROM (đã sửa đổi)
 void syncFirebaseDataToEEPROM() {
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
         Serial.println("Starting Firebase data sync to EEPROM...");
@@ -757,7 +708,7 @@ void syncFirebaseDataToEEPROM() {
         String newPass = getFirebaseData("/masterPassword");
         if (newPass != "" && newPass != masterPassword) {
             masterPassword = newPass;
-            saveMasterPasswordToEEPROM(); 
+            saveMasterPasswordToEEPROM();
             Serial.println("Master password updated from Firebase and saved to EEPROM.");
         }
 
@@ -766,9 +717,9 @@ void syncFirebaseDataToEEPROM() {
             bool newAwayMode = fbdo.boolData();
             if (newAwayMode != awayMode) {
                 awayMode = newAwayMode;
-                saveAwayModeToEEPROM(); 
+                saveAwayModeToEEPROM();
                 Serial.println("Away mode updated from Firebase and saved to EEPROM.");
-                if (!enteringPassword && !doorUnlocked && !addingRFID && !isLockedOut) { // Cập nhật màn hình nếu không có hoạt động khác và không khóa
+                if (!enteringPassword && !doorUnlocked && !addingRFID && !isLockedOut) {
                     displayMainScreen();
                 }
             }
@@ -776,7 +727,7 @@ void syncFirebaseDataToEEPROM() {
             Serial.println("Failed to get Away Mode from Firebase: " + fbdo.errorReason());
         }
 
-        // 3. Cập nhật OTP (không cần lưu vào EEPROM vì OTP mang tính tạm thời)
+        // 3. Cập nhật OTP
         String otpCode = getFirebaseData("/otp/code");
         if (otpCode != "") otp = otpCode;
 
@@ -790,15 +741,19 @@ void syncFirebaseDataToEEPROM() {
         String otpUsed = getFirebaseData("/otp/used");
         if (otpUsed == "true") otp = "";
 
-        // 4. Đồng bộ toàn bộ danh sách RFID từ Firebase xuống EEPROM
-        Serial.println("Syncing all RFID Cards from Firebase to EEPROM...");
-        clearAllRFIDCardsInEEPROM(); // Xóa tất cả thẻ cũ trong EEPROM và mảng cục bộ
-        
+        // 4. Đồng bộ danh sách RFID từ Firebase
+        Serial.println("Syncing all RFID Cards from Firebase to temporary buffer...");
+        // Reset bộ đệm tạm
+        for (int i = 0; i < MAX_RFID_CARDS; i++) {
+            tempRFIDCards[i] = {"", "", false};
+        }
+        tempRFIDCount = 0;
+
+        bool syncSuccess = false;
         if (Firebase.RTDB.getJSON(&fbdo, "/allowedCards")) {
             FirebaseJson &json = fbdo.jsonObject();
             size_t count = json.iteratorBegin();
 
-            int tempCardIndex = 0; 
             for (size_t i = 0; i < count; i++) {
                 String key, value;
                 int type;
@@ -810,36 +765,60 @@ void syncFirebaseDataToEEPROM() {
                     FirebaseJsonData cardIDData, cardNameData;
 
                     if (cardJson.get(cardIDData, "cardID") && cardJson.get(cardNameData, "name")) {
-                        if(tempCardIndex < MAX_RFID_CARDS) {
-                            saveRFIDCardToEEPROM(cardIDData.stringValue, cardNameData.stringValue, tempCardIndex);
-                            tempCardIndex++;
+                        if (tempRFIDCount < MAX_RFID_CARDS) {
+                            String cardID = cardIDData.stringValue;
+                            String cardName = cardNameData.stringValue;
+                            // Đảm bảo cardID và name hợp lệ
+                            if (cardID.length() > 0 && cardName.length() > 0) {
+                                strncpy(tempRFIDCards[tempRFIDCount].cardID, cardID.c_str(), RFID_ID_LEN - 1);
+                                tempRFIDCards[tempRFIDCount].cardID[RFID_ID_LEN - 1] = '\0';
+                                strncpy(tempRFIDCards[tempRFIDCount].name, cardName.c_str(), RFID_NAME_LEN - 1);
+                                tempRFIDCards[tempRFIDCount].name[RFID_NAME_LEN - 1] = '\0';
+                                tempRFIDCards[tempRFIDCount].isValid = true;
+                                tempRFIDCount++;
+                                Serial.print("Added to temp buffer: ID="); Serial.print(cardID);
+                                Serial.print(", Name="); Serial.println(cardName);
+                            } else {
+                                Serial.println("Invalid cardID or name in Firebase data, skipping.");
+                            }
                         } else {
-                            Serial.println("EEPROM MAX_RFID_CARDS limit reached during Firebase sync. Some cards might not be saved locally.");
+                            Serial.println("Temporary buffer full. Cannot add more RFID cards.");
                             break;
                         }
                     }
                 }
             }
             json.iteratorEnd();
-            EEPROM.commit(); // Ghi các thay đổi cuối cùng vào EEPROM
-            currentRFIDCount = tempCardIndex; 
+            syncSuccess = true; // Đánh dấu đồng bộ thành công
+        } else {
+            Serial.println("Failed to get RFID cards from Firebase: " + fbdo.errorReason());
+        }
+
+        // Chỉ ghi vào EEPROM nếu đồng bộ thành công
+        if (syncSuccess && tempRFIDCount > 0) {
+            Serial.println("Sync successful. Clearing EEPROM and saving new RFID data...");
+            clearAllRFIDCardsInEEPROM(); // Xóa EEPROM chỉ khi đã có dữ liệu mới
+            for (int i = 0; i < tempRFIDCount; i++) {
+                saveRFIDCardToEEPROM(String(tempRFIDCards[i].cardID), String(tempRFIDCards[i].name), i);
+            }
+            EEPROM.commit();
+            currentRFIDCount = tempRFIDCount;
             Serial.print("Finished syncing. Total "); Serial.print(currentRFIDCount); Serial.println(" RFID cards saved to EEPROM.");
         } else {
-            Serial.println("No RFID cards found on Firebase or error retrieving: " + fbdo.errorReason() + ". EEPROM data for RFID might be empty.");
+            Serial.println("Sync failed or no valid RFID cards found. Keeping existing EEPROM data.");
         }
     } else {
         Serial.println("Cannot sync Firebase data. No WiFi or Firebase not ready.");
     }
 }
-
-// Kiểm tra mật khẩu (Master hoặc OTP)
+// Check password
 void checkPassword(String input) {
     bool valid = false;
     time_t currentTime = getCurrentTimestamp();
     String accessMethod = "";
 
     if (input == masterPassword) {
-        if (awayMode) { 
+        if (awayMode) {
             displayText("Away Mode ON", "Access Blocked", 1, true);
             logAccess("Password Blocked (Away)", false);
             delay(2000);
@@ -851,26 +830,24 @@ void checkPassword(String input) {
             accessMethod = "Password";
             logAccess("Password", true);
         }
-    }
-    else if (WiFi.status() == WL_CONNECTED && Firebase.ready() && input == otp && otp != "") {
-        if (isNTPTimeValid() && currentTime <= otpValidUntil) { // Only check OTP expiration if NTP is valid
+    } else if (WiFi.status() == WL_CONNECTED && Firebase.ready() && input == otp && otp != "") {
+        if (isNTPTimeValid() && currentTime <= otpValidUntil) {
             valid = true;
             accessMethod = "OTP";
             logAccess("OTP", true);
-            Firebase.RTDB.setBool(&fbdo, "/otp/used", true); // Đánh dấu OTP đã sử dụng trên Firebase
-            updateOtpHistory(otp); // Cập nhật lịch sử OTP
-        } else if (!isNTPTimeValid()){
+            Firebase.RTDB.setBool(&fbdo, "/otp/used", true);
+            updateOtpHistory(otp);
+        } else if (!isNTPTimeValid()) {
             logAccess("OTP Blocked (No NTP)", false);
             displayText("No NTP Sync!", "OTP Unavailable", 1, true);
             delay(2000);
-        } 
-        else {
+        } else {
             logAccess("OTP Expired", false);
             displayText("OTP Expired!", "", 1, true);
             delay(2000);
         }
     } else {
-        if (awayMode) { 
+        if (awayMode) {
             displayText("Away Mode ON", "Access Blocked", 1, true);
             logAccess("Wrong Password (Away)", false);
             delay(2000);
@@ -884,23 +861,23 @@ void checkPassword(String input) {
 
     if (valid) {
         displayText("Access Granted", "Method: " + accessMethod, 1, true);
-        failedAttempts = 0; // Reset số lần thử sai khi truy cập thành công
+        failedAttempts = 0;
         unlockDoor();
-    } else if (!awayMode) { // Chỉ tăng số lần thử sai và khóa nếu không ở chế độ Away
+    } else if (!awayMode) {
         failedAttempts++;
         displayText("Wrong Password!", "Attempts: " + String(failedAttempts), 1, true);
         if (failedAttempts >= maxAttempts) {
-            enterLockoutMode(); // Kích hoạt chế độ khóa tạm thời
+            enterLockoutMode();
         }
     }
 
     delay(2000);
-    if (!doorUnlocked && !isLockedOut) { // Chỉ quay lại màn hình chính nếu không khóa
+    if (!doorUnlocked && !isLockedOut) {
         displayMainScreen();
     }
 }
 
-// Lấy dữ liệu String từ Firebase
+// Get Firebase data
 String getFirebaseData(String path) {
     if (WiFi.status() == WL_CONNECTED && Firebase.ready() && Firebase.RTDB.getString(&fbdo, path)) {
         return fbdo.stringData();
@@ -909,7 +886,7 @@ String getFirebaseData(String path) {
     return "";
 }
 
-// Ghi log truy cập lên Firebase
+// Log access
 void logAccess(String method, bool success, String userName) {
     Serial.print("LOG: Method="); Serial.print(method);
     Serial.print(", Success="); Serial.print(success ? "True" : "False");
@@ -924,16 +901,13 @@ void logAccess(String method, bool success, String userName) {
         Firebase.RTDB.setString(&fbdo, logPath + "/method", method);
         Firebase.RTDB.setBool(&fbdo, logPath + "/success", success);
         Firebase.RTDB.setInt(&fbdo, logPath + "/timestamp", getCurrentTimestamp());
-        
         if (userName != "") {
             Firebase.RTDB.setString(&fbdo, logPath + "/userName", userName);
         }
-    } else {
-        Serial.println("Firebase not connected. Log will not be saved online.");
     }
 }
 
-// Cập nhật trạng thái OTP đã sử dụng trong lịch sử OTP trên Firebase
+// Update OTP history
 void updateOtpHistory(String otpCode) {
     if (WiFi.status() == WL_CONNECTED && Firebase.ready() && Firebase.RTDB.getJSON(&fbdo, "/otpHistory")) {
         FirebaseJson &json = fbdo.jsonObject();
@@ -955,126 +929,124 @@ void updateOtpHistory(String otpCode) {
             }
         }
         json.iteratorEnd();
-    } else {
-        Serial.println("Failed to get OTP history or Firebase not ready: " + fbdo.errorReason());
     }
 }
 
-// --- NEW: LOCKOUT FUNCTIONS ---
-
-// Chuyển hệ thống vào chế độ khóa tạm thời
+// Lockout functions
 void enterLockoutMode() {
     isLockedOut = true;
-    lockoutStartTimeNTP = getCurrentTimestamp(); // Chỉ lưu thời điểm NTP thực tế
-    lockoutStartTimeMillis = millis(); // Thiết lập lockoutStartTimeMillis cho việc đếm ngược ngay lập tức
-    failedAttempts = 0; // Reset số lần thử sai
+    lockoutStartTimeNTP = getCurrentTimestamp();
+    lockoutStartTimeMillis = millis();
+    failedAttempts = 0;
     Serial.println("System entered lockout mode.");
-    saveLockoutStateToEEPROM(); // Lưu trạng thái khóa và timestamp NTP vào EEPROM
+    saveLockoutStateToEEPROM();
 
-    // Đồng bộ lên Firebase (nếu có kết nối) - Đồng bộ tức thì
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
         Firebase.RTDB.setBool(&fbdo, "/lockout/isLockedOut", true);
-        if (isNTPTimeValid()) { // Chỉ gửi timestamp NTP nếu nó hợp lệ
-             Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", (int)lockoutStartTimeNTP); 
+        if (isNTPTimeValid()) {
+            Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", (int)lockoutStartTimeNTP);
         } else {
-            Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0); // Gửi 0 nếu không có NTP hợp lệ
+            Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0);
         }
-        Firebase.RTDB.setInt(&fbdo, "/lockout/duration", LOCKOUT_DURATION_MS / 1000); 
-        Firebase.RTDB.setInt(&fbdo, "/lockout/failedAttempts", 0); 
+        Firebase.RTDB.setInt(&fbdo, "/lockout/duration", LOCKOUT_DURATION_MS / 1000);
+        Firebase.RTDB.setInt(&fbdo, "/lockout/failedAttempts", 0);
         Serial.println("Lockout state pushed to Firebase.");
     }
 }
 
-// Thoát khỏi chế độ khóa tạm thời
 void exitLockoutMode() {
     isLockedOut = false;
-    lockoutStartTimeMillis = 0; // Reset
-    lockoutStartTimeNTP = 0; // Reset
-    failedAttempts = 0; // Đảm bảo reset
+    lockoutStartTimeMillis = 0;
+    lockoutStartTimeNTP = 0;
+    failedAttempts = 0;
     Serial.println("System exited lockout mode.");
-    saveLockoutStateToEEPROM(); // Lưu trạng thái mở khóa vào EEPROM
+    saveLockoutStateToEEPROM();
 
-    // Đồng bộ lên Firebase (nếu có kết nối) - Đồng bộ tức thì
     if (WiFi.status() == WL_CONNECTED && Firebase.ready()) {
         Firebase.RTDB.setBool(&fbdo, "/lockout/isLockedOut", false);
-        Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0); 
+        Firebase.RTDB.setInt(&fbdo, "/lockout/startTime", 0);
         Firebase.RTDB.setInt(&fbdo, "/lockout/failedAttempts", 0);
         Serial.println("Lockout state exit pushed to Firebase.");
     }
-    displayMainScreen(); // Quay lại màn hình chính
+    displayMainScreen();
 }
 
-// Xử lý trạng thái khóa (hiển thị thời gian còn lại, tự động mở khóa)
 void handleLockoutState() {
     if (isLockedOut) {
         time_t currentNTPTimestamp = getCurrentTimestamp();
-
-        // Ưu tiên NTP để xác định thời gian thực tế đã trôi qua
         if (ntpSynced && isNTPTimeValid()) {
             unsigned long elapsedSecondsNTP = currentNTPTimestamp - lockoutStartTimeNTP;
             unsigned long elapsedMillisNTP = elapsedSecondsNTP * 1000UL;
-
             if (elapsedMillisNTP >= LOCKOUT_DURATION_MS) {
-                exitLockoutMode(); // Hết thời gian khóa, thoát chế độ khóa
+                exitLockoutMode();
             } else {
-                // Hiệu chỉnh lockoutStartTimeMillis để đếm ngược chính xác theo millis()
                 lockoutStartTimeMillis = millis() - elapsedMillisNTP;
                 unsigned long remainingTimeSec = (LOCKOUT_DURATION_MS - elapsedMillisNTP) / 1000;
-                displayText("LOCKED OUT!!!", "Try in " + String(remainingTimeSec) + "s", 2, true);
+                
+                // Sửa đổi phần hiển thị
+                display.clearDisplay();
+                display.setTextColor(SSD1306_WHITE);
+                
+                // Dòng 1: "LOCKED OUT" cỡ chữ 2, căn giữa
+                display.setTextSize(2);
+                int16_t x1, y1;
+                uint16_t w, h;
+                String line1 = "LOCKED OUT";
+                display.getTextBounds(line1, 0, 0, &x1, &y1, &w, &h);
+                int x = (SCREEN_WIDTH - w) / 2;
+                display.setCursor(x, 10);
+                display.println(line1);
+                
+                // Dòng 2: "Try in XXs" cỡ chữ 1, căn giữa
+                display.setTextSize(1);
+                String line2 = "Try in " + String(remainingTimeSec) + "s";
+                display.getTextBounds(line2, 0, 0, &x1, &y1, &w, &h);
+                x = (SCREEN_WIDTH - w) / 2;
+                display.setCursor(x, 35); // Đặt vị trí dòng 2
+                display.print(line2);
+                
+                display.display();
             }
         } else {
-            // Nếu không có NTP hoặc NTP chưa hợp lệ, hiển thị thông báo và tiếp tục khóa
             displayText("LOCKED OUT!!!", "No NTP Sync!", 2, true);
-            //Serial.println("Lockout: Waiting for NTP sync to determine lockout status.");
-            // Do not attempt to calculate remaining time with millis() if NTP is not synced after reboot
-            // The system will stay locked out until NTP syncs and validates the time.
         }
     }
 }
-
-// --- EEPROM FUNCTIONS ---
-
-// Lưu Master Password vào EEPROM
+// EEPROM functions
 void saveMasterPasswordToEEPROM() {
     EEPROM.writeString(EEPROM_MASTER_PASSWORD_ADDR, masterPassword);
     EEPROM.commit();
 }
 
-// Tải Master Password từ EEPROM
 void loadMasterPasswordFromEEPROM() {
     String loadedPass = EEPROM.readString(EEPROM_MASTER_PASSWORD_ADDR);
-    if (loadedPass.length() > 0 && loadedPass.length() <= 32) { 
+    if (loadedPass.length() > 0 && loadedPass.length() <= 32) {
         masterPassword = loadedPass;
     } else {
         Serial.println("EEPROM: Master password not found or invalid. Using default.");
     }
 }
 
-// Lưu trạng thái Away Mode vào EEPROM
 void saveAwayModeToEEPROM() {
     EEPROM.writeBool(EEPROM_AWAY_MODE_ADDR, awayMode);
     EEPROM.commit();
 }
 
-// Tải trạng thái Away Mode từ EEPROM
 void loadAwayModeFromEEPROM() {
     awayMode = EEPROM.readBool(EEPROM_AWAY_MODE_ADDR);
 }
 
-// Xóa tất cả thẻ RFID đã lưu trong EEPROM
 void clearAllRFIDCardsInEEPROM() {
     for (int i = 0; i < MAX_RFID_CARDS; i++) {
         int startAddress = EEPROM_RFID_START_ADDR + (i * sizeof(RFIDCardData));
-        RFIDCardData emptyCard = {"", "", false}; // Tạo một thẻ rỗng
-        EEPROM.put(startAddress, emptyCard); // Ghi đè bằng thẻ rỗng
-        localAllowedRFIDCards[i] = emptyCard; // Cập nhật mảng cục bộ
+        RFIDCardData emptyCard = {"", "", false};
+        EEPROM.put(startAddress, emptyCard);
+        localAllowedRFIDCards[i] = emptyCard;
     }
-    EEPROM.commit(); // Ghi các thay đổi vào EEPROM
-    currentRFIDCount = 0; // Reset số lượng thẻ hiện có
-    Serial.println("All RFID cards cleared from EEPROM.");
+    EEPROM.commit();
+    currentRFIDCount = 0;
 }
 
-// Lưu một thẻ RFID vào EEPROM tại một index cụ thể
 void saveRFIDCardToEEPROM(const String& cardID, const String& name, int index) {
     if (index < 0 || index >= MAX_RFID_CARDS) {
         Serial.println("Invalid EEPROM index for RFID card.");
@@ -1082,33 +1054,25 @@ void saveRFIDCardToEEPROM(const String& cardID, const String& name, int index) {
     }
 
     RFIDCardData newCard;
-    // Đảm bảo không ghi tràn bộ đệm
     strncpy(newCard.cardID, cardID.c_str(), RFID_ID_LEN - 1);
-    newCard.cardID[RFID_ID_LEN - 1] = '\0'; 
-
+    newCard.cardID[RFID_ID_LEN - 1] = '\0';
     strncpy(newCard.name, name.c_str(), RFID_NAME_LEN - 1);
-    newCard.name[RFID_NAME_LEN - 1] = '\0'; 
-    
+    newCard.name[RFID_NAME_LEN - 1] = '\0';
     newCard.isValid = true;
 
     int startAddress = EEPROM_RFID_START_ADDR + (index * sizeof(RFIDCardData));
     EEPROM.put(startAddress, newCard);
-    
-    localAllowedRFIDCards[index] = newCard; // Cập nhật mảng cục bộ
-
-    // Không commit ngay lập tức ở đây, để hàm gọi (syncFirebaseDataToEEPROM) xử lý commit cuối cùng
+    localAllowedRFIDCards[index] = newCard;
     Serial.print("RFID card prepared for EEPROM at index "); Serial.print(index);
     Serial.print(": "); Serial.print(newCard.cardID);
     Serial.print(" (Name: "); Serial.print(newCard.name); Serial.println(")");
 }
 
-// Tải tất cả thẻ RFID từ EEPROM
 void loadAllRFIDCardsFromEEPROM() {
     currentRFIDCount = 0;
     for (int i = 0; i < MAX_RFID_CARDS; i++) {
         int startAddress = EEPROM_RFID_START_ADDR + (i * sizeof(RFIDCardData));
         EEPROM.get(startAddress, localAllowedRFIDCards[i]);
-
         if (localAllowedRFIDCards[i].isValid) {
             currentRFIDCount++;
         }
@@ -1116,14 +1080,12 @@ void loadAllRFIDCardsFromEEPROM() {
     Serial.print("Loaded "); Serial.print(currentRFIDCount); Serial.println(" RFID cards from EEPROM.");
 }
 
-// Kiểm tra thẻ RFID cục bộ (trong EEPROM)
 bool checkRFIDLocal(String cardID, String& cardName) {
     for (int i = 0; i < MAX_RFID_CARDS; i++) {
         if (localAllowedRFIDCards[i].isValid) {
             String localCardID(localAllowedRFIDCards[i].cardID);
-            localCardID.replace(" ", ""); // Xóa khoảng trắng
+            localCardID.replace(" ", "");
             localCardID.toUpperCase();
-
             if (localCardID == cardID) {
                 cardName = String(localAllowedRFIDCards[i].name);
                 return true;
@@ -1133,7 +1095,6 @@ bool checkRFIDLocal(String cardID, String& cardName) {
     return false;
 }
 
-// Xóa toàn bộ dữ liệu EEPROM (dùng khi debug hoặc reset)
 void clearEEPROMData() {
     for (int i = 0; i < EEPROM_SIZE; i++) {
         EEPROM.write(i, 0);
@@ -1142,45 +1103,28 @@ void clearEEPROMData() {
     Serial.println("EEPROM data cleared.");
 }
 
-// --- NEW: EEPROM FUNCTIONS FOR LOCKOUT STATE ---
-
-// Lưu trạng thái khóa vào EEPROM
 void saveLockoutStateToEEPROM() {
     EEPROM.writeBool(EEPROM_LOCKED_OUT_ADDR, isLockedOut);
-    // CHỈ LƯU TIMESTAMP NTP!
     EEPROM.put(EEPROM_LOCKOUT_START_TIME_NTP_ADDR, lockoutStartTimeNTP);
     EEPROM.commit();
     Serial.println("Lockout state saved to EEPROM (NTP timestamp used).");
 }
 
-// Tải trạng thái khóa từ EEPROM
 void loadLockoutStateFromEEPROM() {
     isLockedOut = EEPROM.readBool(EEPROM_LOCKED_OUT_ADDR);
-    EEPROM.get(EEPROM_LOCKOUT_START_TIME_NTP_ADDR, lockoutStartTimeNTP); // Lấy timestamp NTP từ EEPROM
-
+    EEPROM.get(EEPROM_LOCKOUT_START_TIME_NTP_ADDR, lockoutStartTimeNTP);
     Serial.print("Lockout state loaded from EEPROM: isLockedOut="); Serial.print(isLockedOut);
     Serial.print(", lockoutStartTimeNTP="); Serial.println(lockoutStartTimeNTP);
 
-    if (isLockedOut) {
-        // NGAY LẬP TỨC KIỂM TRA ĐIỀU KIỆN ĐỂ THOÁT KHÓA NẾU NTP ĐÃ SẴN SÀNG KHI KHỞI ĐỘNG
-        time_t currentNTPTimestamp = getCurrentTimestamp();
-
-        if (ntpSynced && isNTPTimeValid()) {
-            unsigned long elapsedSecondsNTP = currentNTPTimestamp - lockoutStartTimeNTP;
-            unsigned long elapsedMillisNTP = elapsedSecondsNTP * 1000UL;
-
-            if (elapsedMillisNTP >= LOCKOUT_DURATION_MS) {
-                Serial.println("Lockout: Lockout expired on startup (NTP based). Auto-exiting lockout mode.");
-                exitLockoutMode(); 
-            } else {
-                // Nếu chưa hết, hiệu chỉnh lockoutStartTimeMillis (biến cục bộ) để đếm ngược
-                lockoutStartTimeMillis = millis() - elapsedMillisNTP;
-                Serial.println("Lockout: System resumed in lockout mode. Remaining time adjusted by NTP.");
-            }
+    if (isLockedOut && ntpSynced && isNTPTimeValid()) {
+        unsigned long elapsedSecondsNTP = getCurrentTimestamp() - lockoutStartTimeNTP;
+        unsigned long elapsedMillisNTP = elapsedSecondsNTP * 1000UL;
+        if (elapsedMillisNTP >= LOCKOUT_DURATION_MS) {
+            Serial.println("Lockout: Lockout expired on startup (NTP based). Auto-exiting lockout mode.");
+            exitLockoutMode();
         } else {
-            // Nếu không có NTP hoặc NTP không hợp lệ khi khởi động
-            // Hệ thống sẽ vẫn ở trạng thái khóa và chờ NTP đồng bộ để xác định thời gian.
-            Serial.println("Lockout: NTP not synced on startup. Maintaining lockout state until NTP is available.");
+            lockoutStartTimeMillis = millis() - elapsedMillisNTP;
+            Serial.println("Lockout: System resumed in lockout mode. Remaining time adjusted by NTP.");
         }
     }
 }
