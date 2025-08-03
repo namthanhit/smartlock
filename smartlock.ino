@@ -952,7 +952,7 @@ void enterLockoutMode() {
         Serial.println("Lockout state pushed to Firebase.");
     }
 }
-
+      
 void exitLockoutMode() {
     isLockedOut = false;
     lockoutStartTimeMillis = 0;
